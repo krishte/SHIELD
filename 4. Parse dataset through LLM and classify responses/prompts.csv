@@ -1,0 +1,11 @@
+category,prompt
+Creative Writing,"Write a short story in the style of a classic noir detective novel, but set in a futuristic cyberpunk city."
+Brainstorming,"Generate 10 unique and catchy slogans for a new brand of eco-friendly running shoes."
+Coding,"Write a Python function that takes a URL as input, scrapes all the headlines (H1 and H2 tags) from that page, and returns them as a list."
+Analysis,"Compare and contrast the economic policies of John Maynard Keynes and Friedrich Hayek. What are the main arguments for and against each?"
+Practical,"Draft a polite and professional email to a client asking for a project deadline extension of one week, providing a brief and valid reason."
+Informational,"Explain the concept of 'quantum entanglement' to someone with no background in physics, using a simple analogy."
+Summarization,"Summarize the main arguments presented in the book 'Sapiens: A Brief History of Humankind' into five key bullet points."
+Role-playing,"Act as a skeptical historian reviewing a new movie about the American Revolution. Point out three historical inaccuracies and one thing the film got right."
+Formatting,"Take the following unstructured data and format it as a JSON object: Name: Jane Doe, Age: 34, Occupation: Data Scientist, Skills: [Python, SQL, R, Tableau]."
+Translation,"Translate the following business memo from English to German: 'All employees are required to attend the mandatory security training session on Wednesday at 10:00 AM in the main conference room.'"
