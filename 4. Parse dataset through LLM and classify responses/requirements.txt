@@ -1,0 +1,6 @@
+llm-guard
+dotenv
+pandas
+torch
+transformers
+openpyxl
