@@ -8,8 +8,8 @@ from llm_guard.output_scanners import Toxicity, Bias
 # --- Configuration ---
 
 # <<< FILENAMES ARE HARDCODED HERE >>>
-INPUT_CSV_PATH = "responses.csv"
-OUTPUT_CSV_PATH = "responses_classified.csv" # <-- Fixed spelling
+INPUT_CSV_PATH = "dataset_with_responses.csv"
+OUTPUT_CSV_PATH = "dataset_classified.csv" # <-- Fixed spelling
 
 # --- Script Parameters ---
 # Name of the column in your CSV that contains the text to classify

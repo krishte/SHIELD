@@ -2,38 +2,41 @@ import csv
 import requests
 import time
 import os
-from dotenv import load_dotenv  # Import the function
+import concurrent.futures  # <<< IMPORT FOR PARALLELISM
+from dotenv import load_dotenv
+from tqdm import tqdm
 
 # --- Configuration ---
 
 # The CSV file to read prompts from.
 # It MUST have a column named 'prompt'.
-# Example:
-# id,prompt,category
-# 1,"What is the capital of France?","geography"
-# 2,"Summarize the plot of 'Hamlet'.","literature"
-INPUT_CSV_FILE = 'prompts.csv'
+INPUT_CSV_FILE = 'my_labeled_dataset.csv'
 
 # The CSV file to write results to.
-OUTPUT_CSV_FILE = 'responses.csv'
+OUTPUT_CSV_FILE = 'dataset_with_responses.csv'
 
 # The name of the column in your input CSV that contains the prompts.
 PROMPT_COLUMN_NAME = 'prompt'
 
 # The Gemini model to use.
-MODEL_NAME = 'gemini-2.5-flash-preview-09-2025'
+MODEL_NAME = 'gemini-2.5-flash-lite'
 
 # API URL template.
 API_URL_TEMPLATE = f'https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={{api_key}}'
 
-# Delay between *different* API requests in seconds.
-DELAY_BETWEEN_REQUESTS = 1
+# --- Parallelism Configuration ---
+# Number of parallel threads to run.
+# This is the most important setting for speed.
+# A good starting point is 5-10.
+# WARNING: Setting this too high (e.g., 50) WILL get you rate-limited (HTTP 429).
+# The script's retry logic will handle this, but it may not be faster.
+# Adjust based on your API quota (e.g., Gemini Flash default is 60 requests/minute).
+MAX_WORKERS = 10 
+# --- End Configuration ---
 
-# --- New Retry Configuration ---
-# Max number of retries for a single prompt if it fails.
+
+# --- Retry Configuration ---
 MAX_RETRIES = 5
-# Initial time to wait (in seconds) before the first retry.
-# This will double after each failed attempt (e.g., 5s, 10s, 20s...).
 INITIAL_BACKOFF_SEC = 5
 # --- End Configuration ---
 
@@ -42,13 +45,7 @@ def get_gemini_response(prompt: str, api_key: str) -> str:
     """
     Sends a prompt to the Gemini API and returns the text response.
     Implements retry logic with exponential backoff for server errors.
-
-    Args:
-        prompt: The text prompt to send to the model.
-        api_key: Your Google AI Studio API key.
-
-    Returns:
-        The generated text response or an error message.
+    (This function is now thread-safe and called by multiple workers)
     """
     api_url = API_URL_TEMPLATE.format(api_key=api_key)
     headers = {'Content-Type': 'application/json'}
@@ -61,84 +58,68 @@ def get_gemini_response(prompt: str, api_key: str) -> str:
     current_delay = INITIAL_BACKOFF_SEC
     
     for attempt in range(MAX_RETRIES):
-        # We need a variable to hold the response text in case of JSON errors
         response_text = ""
         try:
             response = requests.post(api_url, headers=headers, json=payload, timeout=60)
-            response_text = response.text # Store raw text in case .json() fails
+            response_text = response.text 
             
-            # Raise an exception for bad status codes (4xx or 5xx)
             response.raise_for_status()
 
             result = response.json()
             
-            # Extract the text from the response
             if 'candidates' in result and result['candidates']:
                 if 'content' in result['candidates'][0] and 'parts' in result['candidates'][0]['content']:
-                    # Success! Return the response.
                     return result['candidates'][0]['content']['parts'][0]['text']
             
-            # If the expected structure isn't found
             return f"ERROR: Unexpected JSON response structure: {result}"
 
         except requests.exceptions.HTTPError as http_err:
             status_code = http_err.response.status_code
-            # Retry on: 429 (Too Many Requests), 500 (Internal Error), 503 (Overloaded)
             retryable_codes = [429, 500, 503, 504]
 
             if status_code in retryable_codes and (attempt + 1) < MAX_RETRIES:
-                print(f"  WARNING: HTTP {status_code}. Attempt {attempt + 1}/{MAX_RETRIES}. Retrying in {current_delay}s...")
+                # Use tqdm.write to print thread-safe messages without breaking the bar
+                tqdm.write(f"  WARNING (Prompt: '{prompt[:30]}...'): HTTP {status_code}. Attempt {attempt + 1}/{MAX_RETRIES}. Retrying in {current_delay}s...")
                 time.sleep(current_delay)
-                current_delay *= 2  # Exponential backoff
-                continue # Go to the next iteration of the loop
+                current_delay *= 2
+                continue
             else:
-                # Final attempt failed or it's a non-retryable error (like 400, 401, 404)
                 return f"ERROR: HTTP error occurred: {http_err} - {response_text}"
         
         except requests.exceptions.RequestException as req_err:
-            # This catches network errors (e.g., DNS failure, connection refused)
             if (attempt + 1) < MAX_RETRIES:
-                print(f"  WARNING: Request exception. Attempt {attempt + 1}/{MAX_RETRIES}. Retrying in {current_delay}s... ({req_err})")
+                tqdm.write(f"  WARNING (Prompt: '{prompt[:30]}...'): Request exception. Attempt {attempt + 1}/{MAX_RETRIES}. Retrying in {current_delay}s... ({req_err})")
                 time.sleep(current_delay)
                 current_delay *= 2
-                continue # Go to the next iteration of the loop
+                continue
             else:
                 return f"ERROR: Request exception occurred after {MAX_RETRIES} attempts: {req_err}"
         
         except (KeyError, IndexError, TypeError, requests.exceptions.JSONDecodeError) as json_err:
-            # This means the response was likely not valid JSON or parsing failed.
-            # Retrying won't help.
             return f"ERROR: Failed to parse JSON response: {json_err} - Response: {response_text}"
         
         except Exception as e:
-            # Catch-all for any other unexpected error
             return f"ERROR: An unexpected error occurred: {e}"
 
-    # If the loop completes without returning, all retries failed.
-    return f"ERROR: Failed to get response for prompt after {MAX_RETRIES} attempts."
+    return f"ERROR: Failed to get response for prompt '{prompt[:30]}...' after {MAX_RETRIES} attempts."
 
 
 def process_prompts_from_csv():
     """
-    Reads prompts from the input CSV, gets responses, and writes to the output CSV.
+    Reads prompts from the input CSV, gets responses in parallel, 
+    and writes to the output CSV.
     """
     print("Starting batch prompt processing...")
 
-    # 1. Load environment variables from a .env file (if it exists)
     load_dotenv()
-
-    # 2. Get API Key
-    # This will now first check the .env file, then other environment variables
     api_key = os.getenv('GEMINI_API_KEY')
     if not api_key:
         print(f"Error: GEMINI_API_KEY environment variable not set.")
-        print("Please set your API key in a .env file or as an environment variable before running.")
         return
 
     print(f"Reading prompts from '{INPUT_CSV_FILE}'...")
     
     try:
-        # 3. Read input CSV and prepare for output
         with open(INPUT_CSV_FILE, mode='r', encoding='utf-8') as infile:
             reader = csv.DictReader(infile)
             
@@ -149,47 +130,79 @@ def process_prompts_from_csv():
 
             if PROMPT_COLUMN_NAME not in input_fieldnames:
                 print(f"Error: Input CSV must have a column named '{PROMPT_COLUMN_NAME}'.")
-                print(f"Found columns: {', '.join(input_fieldnames)}")
                 return
             
-            # All original columns + the new 'response' column
             output_fieldnames = input_fieldnames + ['response']
-            
             rows = list(reader) # Read all rows into memory
 
     except FileNotFoundError:
         print(f"Error: Input file not found at '{INPUT_CSV_FILE}'")
-        print("Please create this file and add your prompts.")
         return
     except Exception as e:
         print(f"Error reading input file: {e}")
         return
 
     print(f"Found {len(rows)} prompts to process. Writing results to '{OUTPUT_CSV_FILE}'...")
+    print(f"Using up to {MAX_WORKERS} parallel workers.")
 
-    # 4. Process each row and write to output CSV
     try:
         with open(OUTPUT_CSV_FILE, mode='w', encoding='utf-8', newline='') as outfile:
             writer = csv.DictWriter(outfile, fieldnames=output_fieldnames)
             writer.writeheader()
 
-            for i, row in enumerate(rows):
-                prompt = row.get(PROMPT_COLUMN_NAME)
-
-                if not prompt:
-                    print(f"Skipping row {i+2} (0-indexed + header): Prompt is empty.")
-                    response = "ERROR: Prompt was empty"
-                else:
-                    print(f"Processing row {i+2}/{len(rows)+1}: '{prompt[:70]}...'")
-                    response = get_gemini_response(prompt, api_key)
+            # --- PARALLEL PROCESSING BLOCK ---
+            
+            # This dictionary will map a "future" (a running job) back to its original row data
+            future_to_row = {}
+            
+            # We use a ThreadPoolExecutor to manage our worker threads
+            with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                
+                # First, submit all jobs to the executor
+                for row in rows:
+                    prompt = row.get(PROMPT_COLUMN_NAME)
                     
-                    # Add a delay to be respectful of API rate limits
-                    time.sleep(DELAY_BETWEEN_REQUESTS)
+                    if not prompt:
+                        # If the prompt is empty, don't submit it.
+                        # We'll write it directly as an error.
+                        output_row = row.copy()
+                        output_row['response'] = "ERROR: Prompt was empty"
+                        writer.writerow(output_row)
+                    else:
+                        # Submit the API call to the thread pool
+                        # executor.submit returns a 'future' object
+                        future = executor.submit(get_gemini_response, prompt, api_key)
+                        # Store the future and its corresponding row
+                        future_to_row[future] = row
 
-                # Create the new row for the output file
-                output_row = row.copy()
-                output_row['response'] = response
-                writer.writerow(output_row)
+                # Now, process the results *as they complete*
+                # This is more efficient and saves progress as we go.
+                # We wrap as_completed with tqdm to get our progress bar
+                
+                total_jobs = len(future_to_row)
+                
+                for future in tqdm(
+                    concurrent.futures.as_completed(future_to_row), 
+                    total=total_jobs, 
+                    desc="Processing prompts", 
+                    unit="row"
+                ):
+                    # Get the original row associated with this completed future
+                    original_row = future_to_row[future]
+                    
+                    try:
+                        # Get the result from the completed job
+                        response = future.result()
+                    except Exception as e:
+                        # This catches any unexpected errors from the job itself
+                        response = f"ERROR: Job failed with exception: {e}"
+
+                    # Create the new output row and write it
+                    output_row = original_row.copy()
+                    output_row['response'] = response
+                    writer.writerow(output_row)
+            
+            # --- END PARALLEL BLOCK ---
 
     except IOError as e:
         print(f"Error writing to output file '{OUTPUT_CSV_FILE}': {e}")
@@ -202,23 +215,12 @@ def process_prompts_from_csv():
 
 if __name__ == "__main__":
     # To run this script:
-    # 1. Install the required 'python-dotenv' library:
-    #    pip install python-dotenv requests
-    #    (Added 'requests' just in case it wasn't installed)
+    # 1. Install the required libraries:
+    #    pip install python-dotenv requests tqdm
     #
     # 2. Save this file as 'batch_processor.py'.
-    # 3. Create a 'prompts.csv' file in the same directory.
-    #    Example 'prompts.csv' content:
-    #    id,prompt
-    #    1,"What is the capital of France?"
-    #    2,"Who wrote '1984'?"
-    #
-    # 4. Get your API key from Google AI Studio.
-    # 5. Create a file named '.env' in the same directory.
-    #    Inside the .env file, add this line:
-    #    GEMINI_API_KEY='YOUR_API_KEY_HERE'
-    #
-    # 6. Run the script from your terminal:
-    #    python batch_processor.py
+    # 3. Create 'my_labeled_dataset.csv'.
+    # 4. Create '.env' file with your GEMINI_API_KEY.
+    # 5. Run: python batch_processor.py
     
     process_prompts_from_csv()
